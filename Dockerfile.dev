@@ -1,0 +1,33 @@
+# Stage 1: Dependencies
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+# Stage 2: Runtime
+FROM node:20-alpine
+WORKDIR /app
+
+# Install development tools and required runtime dependencies
+RUN apk add --no-cache dumb-init
+
+# Copy dependencies
+COPY --from=deps /app/node_modules ./node_modules
+COPY package*.json ./
+COPY prisma ./prisma
+COPY tsconfig.json next.config.js postcss.config.js tailwind.config.ts ./
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+
+# Set environment
+ENV NODE_ENV=development \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+USER nextjs
+
+EXPOSE 3000
+
+ENTRYPOINT ["/usr/sbin/dumb-init", "--"]
+CMD ["npm", "run", "dev"]

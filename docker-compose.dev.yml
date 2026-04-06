@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-zyntra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zyntra}
+      POSTGRES_DB: ${POSTGRES_DB:-zyntra}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zyntra}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - zyntra-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-zyntra}:${POSTGRES_PASSWORD:-zyntra}@postgres:5432/${POSTGRES_DB:-zyntra}?schema=public
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-dev-secret-change-in-prod}
+      ZYNTRA_FIELD_ENCRYPTION_KEY: ${ZYNTRA_FIELD_ENCRYPTION_KEY:-CHANGE_ME_BASE64_32_BYTES}
+      RATE_LIMIT_INGEST: ${RATE_LIMIT_INGEST:-60}
+      RATE_LIMIT_RISK: ${RATE_LIMIT_RISK:-60}
+      NODE_ENV: development
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - zyntra-network
+    develop:
+      watch:
+        - path: ./src
+          action: rebuild
+        - path: ./app
+          action: rebuild
+        - path: ./prisma
+          action: rebuild
+        - path: ./package.json
+          action: rebuild
+
+volumes:
+  pgdata:
+
+networks:
+  zyntra-network:
+    driver: bridge

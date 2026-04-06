@@ -1,0 +1,14 @@
+{
+  "features": [
+    "z_glucose",
+    "z_hrv",
+    "z_sleep_score",
+    "z_steps",
+    "z_adherence"
+  ],
+  "auc": 0.5287,
+  "threshold": 0.5,
+  "model_type": "logistic_regression",
+  "dataset": "synthetic_ohio_calibrated",
+  "version": "1.0.0"
+}

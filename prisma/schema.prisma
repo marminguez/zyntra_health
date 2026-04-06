@@ -1,0 +1,162 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// NOTE: SQLite does not support enums. Enum validation is handled at the
+// application layer (Zod schemas + TypeScript types). When switching to
+// PostgreSQL for production, restore:
+//   enum Role { ADMIN CLINICIAN PATIENT SERVICE }
+//   enum SignalSource { CGM WEARABLE MANUAL SYSTEM }
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  password  String   @default("")
+  role      String   @default("PATIENT")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  patient     Patient?
+  auditEvents AuditEvent[]
+  libreConnections LibreConnection[]
+}
+
+model Patient {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id])
+  encryptedDob  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  consents   Consent[]
+  signals    Signal[]
+  baselines  Baseline[]
+  riskScores RiskScore[]
+  integrationTokens IntegrationToken[]
+  libreConnections LibreConnection[]
+}
+
+model Consent {
+  id             String    @id @default(cuid())
+  patientId      String
+  patient        Patient   @relation(fields: [patientId], references: [id])
+  allowCGM       Boolean   @default(false)
+  allowWearable  Boolean   @default(false)
+  allowManual    Boolean   @default(true)
+  policyVersion  String
+  grantedAt      DateTime  @default(now())
+  revokedAt      DateTime?
+
+  @@index([patientId])
+}
+
+model Signal {
+  id             String   @id @default(cuid())
+  patientId      String
+  patient        Patient  @relation(fields: [patientId], references: [id])
+  source         String
+  type           String
+  ts             DateTime
+  value          Float?
+  encryptedValue String?
+  unit           String?
+  metaJson       String?
+  createdAt      DateTime @default(now())
+
+  @@index([patientId])
+  @@index([patientId, type])
+  @@index([patientId, ts])
+}
+
+model Baseline {
+  id         String   @id @default(cuid())
+  patientId  String
+  patient    Patient  @relation(fields: [patientId], references: [id])
+  metric     String
+  windowDays Int
+  mean       Float
+  std        Float
+  updatedAt  DateTime @updatedAt
+
+  @@unique([patientId, metric, windowDays])
+}
+
+model RiskScore {
+  id          String   @id @default(cuid())
+  patientId   String
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  ts          DateTime @default(now())
+  horizonHrs  Int
+  score       Float
+  level       String
+  explanation String
+  confidence  Float    @default(1.0)
+
+  @@index([patientId])
+  @@index([patientId, ts])
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  targetId  String?
+  metaJson  String?
+  ip        String?
+  ua        String?
+  createdAt DateTime @default(now())
+}
+
+
+model LibreConnection {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  patientId     String
+  patient       Patient  @relation(fields: [patientId], references: [id])
+  invitedEmail  String
+  acceptedEmail String?
+  status        String   @default("NOT_STARTED")
+  inviteSentAt  DateTime?
+  acceptedAt    DateTime?
+  firstDataAt   DateTime?
+  lastDataAt    DateTime?
+  lastCheckAt   DateTime?
+  errorCode     String?
+  errorMessage  String?
+  diagnostics   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([patientId])
+  @@index([userId])
+}
+
+model IntegrationToken {
+  id           String   @id @default(cuid())
+  patientId    String
+  patient      Patient  @relation(fields: [patientId], references: [id])
+  provider     String   // "fitbit" | "freestyle"
+  accessToken  String   // cifrado con encryptValue()
+  refreshToken String?  // cifrado con encryptValue()
+  expiresAt    DateTime?
+  scope        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([patientId, provider])
+  @@index([patientId])
+}

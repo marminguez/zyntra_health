@@ -1,0 +1,15 @@
+node_modules/
+.next/
+dist/
+build/
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.git/
+.gitignore
+README.md
+.npmrc
+.env.example
+tests/
+vitest.config.ts
