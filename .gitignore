@@ -38,3 +38,9 @@ yarn-error.log*
 next-env.d.ts
 
 # auth/db/encryption secrets should not be checked in if added here, just keeping .env ignored is fine
+
+# private ML validation datasets (keep metadata/readmes tracked)
+/data/private/*.json
+/data/private/*.npz
+/data/private/*.parquet
+/data/private/*.csv

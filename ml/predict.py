@@ -5,13 +5,15 @@ Writes a JSON object to stdout: {"score": x, "confidence": x, "model_version": "
 Missing features are filled with 0.0 (neutral z-score).
 """
 import json
+import os
 import sys
 import joblib
 import numpy as np
 from pathlib import Path
 
 FEATURES = ["z_glucose", "z_hrv", "z_sleep_score", "z_steps", "z_adherence"]
-MODEL_PATH = Path("ml/model.pkl")
+MODEL_PATH = Path(os.environ.get("MODEL_PATH", "ml/model.pkl"))
+META_PATH = Path(os.environ.get("MODEL_META_PATH", "ml/model_meta.json"))
 
 def main():
     if not MODEL_PATH.exists():
@@ -34,10 +36,9 @@ def main():
     score = float(model.predict_proba(x)[0, 1])
 
     # Load metadata
-    meta_path = Path("ml/model_meta.json")
     model_version = "unknown"
-    if meta_path.exists():
-        with open(meta_path) as mf:
+    if META_PATH.exists():
+        with open(META_PATH) as mf:
             model_version = json.load(mf).get("version", "unknown")
 
     print(json.dumps({

@@ -130,6 +130,36 @@ curl -X POST http://localhost:3000/app-api/risk \
   }'
 ```
 
+
+## Machine Learning Assets
+
+The app has two ML paths under `ml/`:
+
+- `ml/predict.py` serves the lightweight z-score model used by `computeRiskML`. Set `MODEL_PATH` and `MODEL_META_PATH` if you need to point the API at non-default model files.
+- `ml/lstm_hypoglycemia_classifier.py` wraps the bundled `ml/lstm_hypoglycemia_classifier.h5` LSTM hypoglycemia classifier. The LSTM expects one scaled 48-step sequence with this feature order: `glucose`, `bolus`, `carbs_g`, `step_count`, `iob`.
+
+For inference, a dataset is **not** required: the `.h5` file already contains the trained architecture/weights. To keep proving the same 72% baseline accuracy after moving files, changing wrappers or retraining, keep a stable held-out validation dataset outside source control and run it through the LSTM evaluator.
+
+Generate/refresh the LSTM metadata file:
+
+```bash
+npm run ml:lstm:metadata
+```
+
+Run a direct LSTM prediction from JSON on stdin:
+
+```bash
+python -c 'import json; print(json.dumps({"sequence": [[0,0,0,0,0]] * 48}))' | npm run ml:lstm:predict
+```
+
+Verify the 72% baseline against a held-out dataset:
+
+```bash
+npm run ml:lstm:evaluate -- --dataset data/private/lstm_hypoglycemia_holdout.json
+```
+
+The evaluator expects JSON shaped like `{ "sequences": [48x5 rows], "labels": [0/1] }`; see `data/private/README.md` for the recommended private dataset layout. For real inference/evaluation, install the Python ML dependencies (`numpy` and `tensorflow`; `joblib` is also required if passing a scaler). If dependencies are unavailable, the CLI returns JSON with `fallback: true` so callers can safely fall back to the rule-based model.
+
 ## Running Tests
 
 ```bash

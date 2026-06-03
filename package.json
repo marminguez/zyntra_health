@@ -12,7 +12,10 @@
     "seed": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/seed.ts",
     "postinstall": "prisma generate",
     "ml:gen": "python ml/generate_synthetic.py",
-    "ml:train": "python ml/train_logreg.py"
+    "ml:train": "python ml/train_logreg.py",
+    "ml:lstm:metadata": "python ml/lstm_hypoglycemia_classifier.py metadata",
+    "ml:lstm:predict": "python ml/lstm_hypoglycemia_classifier.py predict",
+    "ml:lstm:evaluate": "python ml/lstm_hypoglycemia_classifier.py evaluate"
   },
   "dependencies": {
     "@diakem/libre-link-up-api-client": "^0.7.2",
