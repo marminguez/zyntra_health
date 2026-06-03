@@ -200,4 +200,4 @@ zyntra/
 
 ## License
 
-Private – Harvard Project
+Private – MarMinguez
