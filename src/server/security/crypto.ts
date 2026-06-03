@@ -2,10 +2,11 @@ import crypto from "crypto";
 
 const SENSITIVE_TYPES = new Set([
     "cgm_glucose_mgdl",
-    "hr_bpm",
-    "hrv_rmssd",
-    "sleep_minutes",
-    "steps",
+    "wearable_hrv_ms",
+    "wearable_sleep_score",
+    "wearable_steps",
+    "insulin_bolus_units",
+    "meal_carbs_g",
 ]);
 
 function getKey(): Buffer {

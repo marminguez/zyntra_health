@@ -18,6 +18,7 @@ Fecha: 2026-04-11
 """
 
 from pathlib import Path
+import pickle
 import re
 import warnings
 
@@ -49,6 +50,8 @@ DEFAULT_DATA_DIRS = [
 ]
 MODEL_PATH = MODELS_DIR / 'lstm_hypoglycemia_classifier.h5'
 THRESHOLD_PATH = MODELS_DIR / 'optimal_threshold.npy'
+SCALER_PATH = MODELS_DIR / 'lstm_feature_scaler.pkl'
+FEATURE_NAMES_PATH = MODELS_DIR / 'lstm_feature_names.json'
 DEFAULT_THRESHOLD = 0.5
 
 # ==========================================
@@ -495,6 +498,13 @@ def main():
     scaler = StandardScaler()
     X_features = [c for c in df_all.columns if c not in ['glucose_future', 'target_hypo', 'p_id']]
     df_all[X_features] = scaler.fit_transform(df_all[X_features])
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(SCALER_PATH, 'wb') as scaler_file:
+        pickle.dump(scaler, scaler_file)
+    with open(FEATURE_NAMES_PATH, 'w') as feature_file:
+        import json
+        json.dump(X_features, feature_file, indent=2)
+    print(f"   ✅ Scaler guardado como '{SCALER_PATH}'")
     
     # 4. Separar train/test por paciente cuando hay varios pacientes.
     # Si solo existe un paciente demo, se usa un split cronológico 80/20.
@@ -563,7 +573,6 @@ def main():
     print(f"   Peso clase 1 (hipo):    {class_weights[1]:.2f}")
     
     # 6. Construir y entrenar modelo O cargar existente
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     if MODEL_PATH.exists():
         print("\n" + "="*70)

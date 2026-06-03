@@ -7,6 +7,8 @@ export const SIGNAL_TYPES = [
   "wearable_steps",
   "wearable_activity_intensity",
   "manual_adherence_score",
+  "insulin_bolus_units",
+  "meal_carbs_g",
 ] as const;
 
 export type SignalType = typeof SIGNAL_TYPES[number];

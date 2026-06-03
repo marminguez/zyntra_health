@@ -12,7 +12,8 @@
     "seed": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/seed.ts",
     "postinstall": "prisma generate",
     "ml:gen": "python ml/generate_synthetic.py",
-    "ml:train": "python ml/train_logreg.py"
+    "ml:train": "python ml/train_logreg.py",
+    "ml:hypo": "python ml/lstm_hypoglycemia_classifier.py"
   },
   "dependencies": {
     "@diakem/libre-link-up-api-client": "^0.7.2",
