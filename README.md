@@ -130,6 +130,25 @@ curl -X POST http://localhost:3000/app-api/risk \
   }'
 ```
 
+
+## ML Hypoglycemia Classifier
+
+The LSTM hypoglycemia classifier lives under `ml/` so model code and binary artifacts are kept together:
+
+```text
+ml/lstm_hypoglycemia_classifier.py
+ml/models/lstm_hypoglycemia_classifier.h5
+ml/models/optimal_threshold.npy   # optional; defaults to 0.50 when missing
+```
+
+Run it from the repository root with:
+
+```bash
+python ml/lstm_hypoglycemia_classifier.py
+```
+
+The script now resolves paths from its own location, so it can load the model from `ml/models/` and detect either the original UoM folder layout or the demo CSVs in `data/raw/demo/`.
+
 ## Running Tests
 
 ```bash

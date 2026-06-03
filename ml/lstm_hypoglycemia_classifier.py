@@ -17,93 +17,196 @@ Autor: Análisis de Sesgos LSTM
 Fecha: 2026-04-11
 """
 
+from pathlib import Path
+import re
+import warnings
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import re
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Bidirectional, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
-    classification_report, confusion_matrix, 
-    roc_auc_score, roc_curve, precision_recall_curve,
-    f1_score, recall_score, precision_score
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
 )
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
-import matplotlib.pyplot as plt
-import warnings
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.layers import Bidirectional, Dense, Dropout, LSTM
+from tensorflow.keras.models import Sequential, load_model
+
 warnings.filterwarnings('ignore')
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+ML_DIR = Path(__file__).resolve().parent
+MODELS_DIR = ML_DIR / 'models'
+DEFAULT_DATA_DIRS = [
+    REPO_ROOT,
+    REPO_ROOT / 'data' / 'raw' / 'demo',
+]
+MODEL_PATH = MODELS_DIR / 'lstm_hypoglycemia_classifier.h5'
+THRESHOLD_PATH = MODELS_DIR / 'optimal_threshold.npy'
+DEFAULT_THRESHOLD = 0.5
 
 # ==========================================
 # 1. FUNCIONES DE PREPARACIÓN DE DATOS
 # ==========================================
 
-def process_full_data(base_path='../'):
-    """
-    Procesa todos los datos de pacientes usando tu formato exacto
-    """
-    import glob
-    import os
-    import re
-    
-    glucose_files = glob.glob(os.path.join(base_path, 'Glucose Data/UoMGlucose*.csv'))
-    all_patients_data = []
-    id_pattern = re.compile(r'UoMGlucose(\d+)\.csv')
-    
-    for file_path in glucose_files:
-        match = id_pattern.search(os.path.basename(file_path))
-        if not match:
+def _candidate_data_roots(base_path=None):
+    """Devuelve raíces de datos candidatas para el formato original y el demo del repo."""
+    roots = []
+    if base_path is not None:
+        roots.append(Path(base_path).expanduser().resolve())
+    roots.extend(DEFAULT_DATA_DIRS)
+
+    deduped = []
+    for root in roots:
+        if root not in deduped:
+            deduped.append(root)
+    return deduped
+
+
+def _find_patient_ids(data_roots):
+    """Encuentra IDs de paciente en carpetas originales o en `data/raw/demo`."""
+    id_pattern = re.compile(r'UoMGlucose(\d+)\.csv$')
+    patient_ids = set()
+
+    for root in data_roots:
+        if not root.exists():
             continue
-        p_id = int(match.group(1))
-        
+        for glucose_file in root.rglob('UoMGlucose*.csv'):
+            match = id_pattern.search(glucose_file.name)
+            if match:
+                patient_ids.add(int(match.group(1)))
+
+    return sorted(patient_ids)
+
+
+def _find_first_existing(data_roots, patient_id, file_name, legacy_relative_path):
+    """Busca un archivo por nombre plano o por la ruta histórica del dataset."""
+    candidates = []
+    for root in data_roots:
+        candidates.extend([
+            root / file_name,
+            root / legacy_relative_path,
+        ])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    for root in data_roots:
+        if not root.exists():
+            continue
+        matches = list(root.rglob(file_name))
+        if matches:
+            return matches[0]
+
+    raise FileNotFoundError(f'No se encontró {file_name} para el paciente {patient_id}')
+
+
+def _read_csv(path):
+    """Lee CSVs exportados con o sin BOM en cabecera."""
+    df = pd.read_csv(path, encoding='utf-8-sig')
+    df.columns = [c.replace('\ufeff', '') for c in df.columns]
+    return df
+
+
+def process_full_data(base_path=None):
+    """
+    Procesa datos de pacientes desde el layout original o desde `data/raw/demo`.
+
+    El script original asumía carpetas hermanas como `Glucose Data/`.
+    Esta versión también detecta los CSV planos subidos al repo, por ejemplo
+    `data/raw/demo/UoMGlucose2302.csv`.
+    """
+    data_roots = _candidate_data_roots(base_path)
+    patient_ids = _find_patient_ids(data_roots)
+    all_patients_data = []
+
+    if not patient_ids:
+        roots = ', '.join(str(root) for root in data_roots)
+        raise FileNotFoundError(f'No se encontraron archivos UoMGlucose*.csv en: {roots}')
+
+    for p_id in patient_ids:
         try:
+            glucose_path = _find_first_existing(
+                data_roots,
+                p_id,
+                f'UoMGlucose{p_id}.csv',
+                f'Glucose Data/UoMGlucose{p_id}.csv',
+            )
+            bolus_path = _find_first_existing(
+                data_roots,
+                p_id,
+                f'UoMBolus{p_id}.csv',
+                f'Insulin Data/Bolus Data/UoMBolus{p_id}.csv',
+            )
+            meals_path = _find_first_existing(
+                data_roots,
+                p_id,
+                f'UoMNutrition{p_id}.csv',
+                f'Nutrition Data/UoMNutrition{p_id}.csv',
+            )
+            activity_path = _find_first_existing(
+                data_roots,
+                p_id,
+                f'UoMActivity{p_id}.csv',
+                f'Activity Data/UoMActivity{p_id}.csv',
+            )
+
             # Carga de archivos
-            df_bg = pd.read_csv(os.path.join(base_path, f'Glucose Data/UoMGlucose{p_id}.csv'))
-            df_bolus = pd.read_csv(os.path.join(base_path, f'Insulin Data/Bolus Data/UoMBolus{p_id}.csv'))
-            df_meals = pd.read_csv(os.path.join(base_path, f'Nutrition Data/UoMNutrition{p_id}.csv'))
-            df_activity = pd.read_csv(os.path.join(base_path, f'Activity Data/UoMActivity{p_id}.csv'))
-            
+            df_bg = _read_csv(glucose_path)
+            df_bolus = _read_csv(bolus_path)
+            df_meals = _read_csv(meals_path)
+            df_activity = _read_csv(activity_path)
+
             def to_5min_grid(df, col):
                 df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce').dt.tz_localize(None)
                 df = df.dropna(subset=[col]).copy()
                 df['ts_grid'] = df[col].dt.floor('5min')
                 return df
-            
+
             df_bg = to_5min_grid(df_bg, 'bg_ts')
             df_bolus = to_5min_grid(df_bolus, 'bolus_ts')
             df_meals = to_5min_grid(df_meals, 'meal_ts')
             df_activity = to_5min_grid(df_activity, 'activity_ts')
-            
+
             master_index = pd.date_range(
                 start=df_bg['ts_grid'].min(),
                 end=df_bg['ts_grid'].max(),
-                freq='5min'
+                freq='5min',
             )
             df_p = pd.DataFrame(index=master_index)
-            
+
             # Join de datos fisiológicos
             df_bg_clean = df_bg.drop_duplicates('ts_grid').set_index('ts_grid')
             df_p['glucose'] = df_bg_clean['value'].reindex(df_p.index).interpolate(method='time') * 18
             df_p['bolus'] = df_bolus.groupby('ts_grid')['bolus_dose'].sum().reindex(df_p.index).fillna(0)
             df_p = df_p.join(df_meals.groupby('ts_grid')[['carbs_g']].sum()).fillna(0)
             df_p = df_p.join(df_activity.groupby('ts_grid')[['step_count']].sum()).fillna(0)
-            
+
             # Features temporales e IOB simple
             df_p['iob'] = df_p['bolus'].rolling(window=48, min_periods=1).sum()
             df_p['p_id'] = p_id
-            
+
             # Target BINARIO: ¿Habrá hipoglucemia en 30 min?
             df_p['glucose_future'] = df_p['glucose'].shift(-6)  # 30 min adelante
             df_p['target_hypo'] = (df_p['glucose_future'] < 70).astype(int)  # 1 = hipoglucemia, 0 = no
-            
+
             all_patients_data.append(df_p.dropna())
-            print(f"Paciente {p_id}: OK")
-            
+            print(f'Paciente {p_id}: OK ({glucose_path.parent})')
+
         except Exception as e:
-            print(f"Error en Paciente {p_id}: {e}")
+            print(f'Error en Paciente {p_id}: {e}')
             continue
-    
+
+    if not all_patients_data:
+        raise RuntimeError('Se encontraron pacientes, pero ninguno pudo procesarse correctamente.')
+
     return pd.concat(all_patients_data)
 
 
@@ -358,7 +461,7 @@ def generate_classification_gif(model, X_seq, y_true, scaler, glucose_col_idx=0,
         return line_gluc, line_risk, line_proj, point_now, txt_info
         
     ani = animation.FuncAnimation(fig, animate, frames=num_frames, init_func=init, blit=True, interval=100)
-    filename = 'prediccion_clasificacion_dinamica.gif'
+    filename = ML_DIR / 'prediccion_clasificacion_dinamica.gif'
     ani.save(filename, writer='pillow', fps=5)
     plt.close()
     print(f"✅ ¡Éxito! GIF animado mejorado guardado como '{filename}'")
@@ -378,7 +481,7 @@ def main():
     
     # 1. Cargar y preparar datos
     print("\n📁 Cargando datos...")
-    df_all = process_full_data('../')
+    df_all = process_full_data()
     
     # 2. Análisis de distribución de clases
     n_hypo_total = df_all['target_hypo'].sum()
@@ -393,41 +496,49 @@ def main():
     X_features = [c for c in df_all.columns if c not in ['glucose_future', 'target_hypo', 'p_id']]
     df_all[X_features] = scaler.fit_transform(df_all[X_features])
     
-    # 4. Separar train/test por paciente
-    print("\n✂️  Separando train/test por paciente...")
-    p_ids = df_all['p_id'].unique()
-    train_ids = p_ids[:int(len(p_ids)*0.8)]
-    test_ids = p_ids[int(len(p_ids)*0.8):]
-    
+    # 4. Separar train/test por paciente cuando hay varios pacientes.
+    # Si solo existe un paciente demo, se usa un split cronológico 80/20.
+    print("\n✂️  Separando train/test...")
+    p_ids = sorted(df_all['p_id'].unique())
     LOOKBACK = 48
-    
-    # Train
-    X_train_list, y_train_list = [], []
-    for pid in train_ids:
-        X_p, y_p = create_sequences_for_classification(
-            df_all[df_all['p_id'] == pid], 
-            lookback=LOOKBACK
-        )
-        if len(X_p) > 0:
-            X_train_list.append(X_p)
-            y_train_list.append(y_p)
-    
-    X_train = np.concatenate(X_train_list)
-    y_train = np.concatenate(y_train_list)
-    
-    # Test
-    X_test_list, y_test_list = [], []
-    for pid in test_ids:
-        X_p, y_p = create_sequences_for_classification(
-            df_all[df_all['p_id'] == pid], 
-            lookback=LOOKBACK
-        )
-        if len(X_p) > 0:
-            X_test_list.append(X_p)
-            y_test_list.append(y_p)
-    
-    X_test = np.concatenate(X_test_list)
-    y_test = np.concatenate(y_test_list)
+
+    if len(p_ids) > 1:
+        train_ids = p_ids[:int(len(p_ids) * 0.8)]
+        test_ids = p_ids[int(len(p_ids) * 0.8):]
+
+        X_train_list, y_train_list = [], []
+        for pid in train_ids:
+            X_p, y_p = create_sequences_for_classification(
+                df_all[df_all['p_id'] == pid],
+                lookback=LOOKBACK,
+            )
+            if len(X_p) > 0:
+                X_train_list.append(X_p)
+                y_train_list.append(y_p)
+
+        X_test_list, y_test_list = [], []
+        for pid in test_ids:
+            X_p, y_p = create_sequences_for_classification(
+                df_all[df_all['p_id'] == pid],
+                lookback=LOOKBACK,
+            )
+            if len(X_p) > 0:
+                X_test_list.append(X_p)
+                y_test_list.append(y_p)
+
+        X_train = np.concatenate(X_train_list)
+        y_train = np.concatenate(y_train_list)
+        X_test = np.concatenate(X_test_list)
+        y_test = np.concatenate(y_test_list)
+    else:
+        split_idx = int(len(df_all) * 0.8)
+        train_df = df_all.iloc[:split_idx]
+        test_df = df_all.iloc[split_idx:]
+        X_train, y_train = create_sequences_for_classification(train_df, lookback=LOOKBACK)
+        X_test, y_test = create_sequences_for_classification(test_df, lookback=LOOKBACK)
+
+    if len(X_train) == 0 or len(X_test) == 0:
+        raise RuntimeError('No hay suficientes muestras para crear secuencias de train/test.')
     
     print(f"   Train: {len(X_train)} muestras")
     print(f"   Test:  {len(X_test)} muestras")
@@ -439,31 +550,34 @@ def main():
     
     # 5. Calcular class weights
     print("\n⚖️  Calculando class weights para balancear clases...")
+    present_classes = np.unique(y_train)
     class_weights_array = compute_class_weight(
         'balanced',
-        classes=np.array([0, 1]),
-        y=y_train
+        classes=present_classes,
+        y=y_train,
     )
-    class_weights = {0: class_weights_array[0], 1: class_weights_array[1]}
+    class_weights = {int(cls): weight for cls, weight in zip(present_classes, class_weights_array)}
+    class_weights.setdefault(0, 1.0)
+    class_weights.setdefault(1, 1.0)
     print(f"   Peso clase 0 (no-hipo): {class_weights[0]:.2f}")
     print(f"   Peso clase 1 (hipo):    {class_weights[1]:.2f}")
     
-    import os
-    from tensorflow.keras.models import load_model
+    # 6. Construir y entrenar modelo O cargar existente
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 6. Construir y entrenar modelo O Cargar existente
-    model_path = 'lstm_hypoglycemia_classifier.h5'
-    threshold_path = 'optimal_threshold.npy'
-    
-    if os.path.exists(model_path) and os.path.exists(threshold_path):
+    if MODEL_PATH.exists():
         print("\n" + "="*70)
         print("   📥 RECUPERANDO MODELO PREVIAMENTE ENTRENADO...")
         print("="*70)
-        model = load_model(model_path)
-        optimal_threshold = float(np.load(threshold_path))
-        print(f"   ✅ Modelo '{model_path}' cargado correctamente!")
-        print(f"   ✅ Threshold óptimo '{optimal_threshold:.2f}' restaurado!")
-        
+        model = load_model(MODEL_PATH)
+        if THRESHOLD_PATH.exists():
+            optimal_threshold = float(np.load(THRESHOLD_PATH))
+            print(f"   ✅ Threshold óptimo '{optimal_threshold:.2f}' restaurado!")
+        else:
+            optimal_threshold = DEFAULT_THRESHOLD
+            print(f"   ⚠️  No se encontró '{THRESHOLD_PATH.name}'. Usando threshold por defecto: {DEFAULT_THRESHOLD:.2f}")
+        print(f"   ✅ Modelo '{MODEL_PATH}' cargado correctamente!")
+
     else:
         print("\n🏗️  Construyendo clasificador LSTM...")
         model = build_hypoglycemia_classifier(LOOKBACK, len(X_features))
@@ -510,9 +624,9 @@ def main():
         
         # Guardar modelo para la proxima vez
         print("\n💾 Guardando clasificador...")
-        model.save(model_path)
-        np.save(threshold_path, optimal_threshold)
-        print(f"   ✅ Modelo guardado como '{model_path}'")
+        model.save(MODEL_PATH)
+        np.save(THRESHOLD_PATH, optimal_threshold)
+        print(f"   ✅ Modelo guardado como '{MODEL_PATH}'")
     
     # 8. Evaluación en test con threshold óptimo
     print("\n📊 Evaluando en test set...")
