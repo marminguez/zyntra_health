@@ -1,6 +1,6 @@
 # Zyntra – Adaptive Metabolic Intelligence Layer
 
-A secure infrastructure layer that ingests metabolic + wearable signals, stores them with consent gating, computes baseline statistics and 24/48/72-hour risk scores, and exposes API endpoints plus a minimal dashboard.
+A secure infrastructure layer that ingests metabolic + wearable signals, stores them with consent gating, computes baseline statistics and 30 min 1/24-hour risk scores, and exposes API endpoints plus a minimal dashboard.
 
 ## Tech Stack
 
