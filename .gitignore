@@ -38,3 +38,10 @@ yarn-error.log*
 next-env.d.ts
 
 # auth/db/encryption secrets should not be checked in if added here, just keeping .env ignored is fine
+
+# python
+__pycache__/
+*.py[cod]
+
+# generated ML visualizations
+ml/prediccion_clasificacion_dinamica.gif
