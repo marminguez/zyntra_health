@@ -1,3 +1,6 @@
 numpy
+pandas
+scikit-learn
+matplotlib
 # Use tensorflow on platforms that provide native wheels; tensorflow-cpu is also compatible for server inference.
 tensorflow-cpu
