@@ -16,7 +16,7 @@ function Invoke-Checked {
   )
   & $Exe @Args
   if ($LASTEXITCODE -ne 0) {
-    throw "Command failed with exit code $LASTEXITCODE: $Exe $($Args -join ' ')"
+    throw "Command failed with exit code ${LASTEXITCODE}: $Exe $($Args -join ' ')"
   }
 }
 
@@ -30,8 +30,12 @@ if ($xml.Count -lt 12) {
 }
 
 if (-not (Test-Path $Venv)) {
-  py -3.11 -m venv $Venv
-  if ($LASTEXITCODE -ne 0) { throw "Could not create Python 3.11 virtual environment." }
+  if (Test-Path 'D:\Python313\python.exe') {
+    & 'D:\Python313\python.exe' -m venv $Venv
+  } else {
+    py -3.13 -m venv $Venv
+  }
+  if ($LASTEXITCODE -ne 0) { throw "Could not create Python 3.13 virtual environment." }
 }
 
 Invoke-Checked $Python -m pip install --upgrade pip
