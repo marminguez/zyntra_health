@@ -4,10 +4,12 @@ on:
   push:
     branches:
       - main
-      - 'feat/hypo-v3-alert-quality'
+      - 'feat/hypo-*'
+      - 'fix/hypo-*'
   pull_request:
     branches:
       - main
+      - 'feat/hypo-*'
   workflow_dispatch:
 
 jobs:
@@ -54,7 +56,7 @@ jobs:
       - name: Upload evaluation artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zyntra-hypo-v3-evaluation
+          name: zyntra-hypo-evaluation
           path: |
             ml/models/evaluation_v2.json
             ml/models/alert_analysis.csv
