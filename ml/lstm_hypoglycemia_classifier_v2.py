@@ -1,7 +1,13 @@
-"""Leakage-safe, event-aware training/evaluation pipeline for Zyntra hypoglycemia LSTM."""
+"""Leakage-safe, event-aware training/evaluation pipeline for Zyntra Hypo V5."""
 from pathlib import Path
 import json
+import os
 import pickle
+import random
+
+# Set deterministic flags before TensorFlow initializes.
+os.environ.setdefault("PYTHONHASHSEED", "42")
+os.environ.setdefault("TF_DETERMINISTIC_OPS", "1")
 
 import numpy as np
 import pandas as pd
@@ -13,105 +19,101 @@ from tensorflow.keras.callbacks import EarlyStopping
 
 from alert_quality import build_alert_analysis, threshold_sweep
 from event_evaluation import evaluate_events
-from lstm_hypoglycemia_classifier import (
-    build_hypoglycemia_classifier, create_sequences_for_classification,
-    find_optimal_threshold, process_full_data,
-)
+from lstm_hypoglycemia_classifier import build_hypoglycemia_classifier, create_sequences_for_classification, find_optimal_threshold, process_full_data
 
-ML_DIR = Path(__file__).resolve().parent
-MODELS_DIR = ML_DIR / "models"
-MODEL_PATH = MODELS_DIR / "lstm_hypoglycemia_classifier_v2.h5"
-THRESHOLD_PATH = MODELS_DIR / "optimal_threshold_v2.npy"
-SCALER_PATH = MODELS_DIR / "lstm_feature_scaler_v2.pkl"
-FEATURE_NAMES_PATH = MODELS_DIR / "lstm_feature_names_v2.json"
-EVALUATION_PATH = MODELS_DIR / "evaluation_v2.json"
-ALERT_ANALYSIS_PATH = MODELS_DIR / "alert_analysis.csv"
-THRESHOLD_SWEEP_PATH = MODELS_DIR / "threshold_sweep.csv"
-LOOKBACK = 48
-BETA = 5.0
-EXCLUDED_COLUMNS = ["glucose_future", "target_hypo", "p_id"]
+SEED=42
+random.seed(SEED); np.random.seed(SEED); tf.keras.utils.set_random_seed(SEED)
+try: tf.config.experimental.enable_op_determinism()
+except Exception: pass
+
+ML_DIR=Path(__file__).resolve().parent; MODELS_DIR=ML_DIR/"models"
+MODEL_PATH=MODELS_DIR/"lstm_hypoglycemia_classifier_v2.h5"; THRESHOLD_PATH=MODELS_DIR/"optimal_threshold_v2.npy"; SCALER_PATH=MODELS_DIR/"lstm_feature_scaler_v2.pkl"; FEATURE_NAMES_PATH=MODELS_DIR/"lstm_feature_names_v2.json"; EVALUATION_PATH=MODELS_DIR/"evaluation_v2.json"; ALERT_ANALYSIS_PATH=MODELS_DIR/"alert_analysis.csv"; THRESHOLD_SWEEP_PATH=MODELS_DIR/"threshold_sweep.csv"
+LOOKBACK=48; BETA=5.0; EXCLUDED_COLUMNS=["glucose_future","target_hypo","p_id"]
 
 
-def _json_default(value):
-    if isinstance(value, np.integer): return int(value)
-    if isinstance(value, np.floating): return float(value)
-    if isinstance(value, np.ndarray): return value.tolist()
-    if isinstance(value, (pd.Timestamp, np.datetime64)): return str(value)
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+def _json_default(v):
+    if isinstance(v,np.integer): return int(v)
+    if isinstance(v,np.floating): return float(v)
+    if isinstance(v,np.ndarray): return v.tolist()
+    if isinstance(v,(pd.Timestamp,np.datetime64)): return str(v)
+    raise TypeError(type(v).__name__)
 
 
-def chronological_split(df, train_fraction=0.70, val_fraction=0.15):
-    n=len(df); train_end=int(n*train_fraction); val_end=int(n*(train_fraction+val_fraction))
-    return df.iloc[:train_end].copy(),df.iloc[train_end:val_end].copy(),df.iloc[val_end:].copy()
+def add_glucose_dynamics(df):
+    """Add causal CGM dynamics; only past/current glucose is used."""
+    out=df.copy()
+    grouped=out.groupby("p_id",sort=False)["glucose"]
+    out["glucose_delta_5m"]=grouped.diff(1)
+    out["glucose_delta_15m"]=grouped.diff(3)
+    out["glucose_delta_30m"]=grouped.diff(6)
+    previous_15=grouped.shift(3)-grouped.shift(6)
+    out["glucose_acceleration_15m"]=out["glucose_delta_15m"]-previous_15
+    dynamics=["glucose_delta_5m","glucose_delta_15m","glucose_delta_30m","glucose_acceleration_15m"]
+    out[dynamics]=out.groupby("p_id",sort=False)[dynamics].transform(lambda x:x.fillna(0.0))
+    return out
+
+
+def chronological_split(df,train_fraction=.70,val_fraction=.15):
+    n=len(df); a=int(n*train_fraction); b=int(n*(train_fraction+val_fraction)); return df.iloc[:a].copy(),df.iloc[a:b].copy(),df.iloc[b:].copy()
 
 
 def split_dataset(df):
-    patient_ids=sorted(df["p_id"].unique())
-    if len(patient_ids)>=3:
-        rng=np.random.default_rng(42); ids=np.asarray(patient_ids); rng.shuffle(ids); n=len(ids)
-        n_train=max(1,int(n*.70)); n_val=max(1,int(n*.15))
-        if n_train+n_val>=n: n_train,n_val=n-2,1
-        train_ids=ids[:n_train].tolist(); val_ids=ids[n_train:n_train+n_val].tolist(); test_ids=ids[n_train+n_val:].tolist()
-        return df[df.p_id.isin(train_ids)].copy(),df[df.p_id.isin(val_ids)].copy(),df[df.p_id.isin(test_ids)].copy(),{"strategy":"patient_disjoint","train_ids":train_ids,"val_ids":val_ids,"test_ids":test_ids}
-    if len(patient_ids)==2:
-        train_val=df[df.p_id==patient_ids[0]].copy(); test_df=df[df.p_id==patient_ids[1]].copy(); train_df,val_df,_=chronological_split(train_val,.80,.20)
-        return train_df,val_df,test_df,{"strategy":"hybrid_two_patient","train_ids":[patient_ids[0]],"val_ids":[patient_ids[0]],"test_ids":[patient_ids[1]]}
-    train_df,val_df,test_df=chronological_split(df)
-    return train_df,val_df,test_df,{"strategy":"chronological_single_patient","train_ids":patient_ids,"val_ids":patient_ids,"test_ids":patient_ids,"warning":"Single-patient evaluation does not demonstrate generalization to unseen patients."}
+    ids=sorted(df.p_id.unique())
+    if len(ids)>=3:
+        rng=np.random.default_rng(SEED); arr=np.asarray(ids); rng.shuffle(arr); n=len(arr); nt=max(1,int(n*.70)); nv=max(1,int(n*.15))
+        if nt+nv>=n: nt,nv=n-2,1
+        tr,va,te=arr[:nt].tolist(),arr[nt:nt+nv].tolist(),arr[nt+nv:].tolist()
+        return df[df.p_id.isin(tr)].copy(),df[df.p_id.isin(va)].copy(),df[df.p_id.isin(te)].copy(),{"strategy":"patient_disjoint","train_ids":tr,"val_ids":va,"test_ids":te}
+    if len(ids)==2:
+        tv=df[df.p_id==ids[0]].copy(); test=df[df.p_id==ids[1]].copy(); train,val,_=chronological_split(tv,.80,.20); return train,val,test,{"strategy":"hybrid_two_patient","train_ids":[ids[0]],"val_ids":[ids[0]],"test_ids":[ids[1]]}
+    train,val,test=chronological_split(df); return train,val,test,{"strategy":"chronological_single_patient","train_ids":ids,"val_ids":ids,"test_ids":ids,"warning":"Single-patient evaluation does not demonstrate generalization to unseen patients."}
 
 
-def fit_and_apply_scaler(train_df,val_df,test_df,feature_names):
-    scaler=StandardScaler(); scaler.fit(train_df[feature_names]); scaled=[]
-    for frame in (train_df,val_df,test_df):
-        out=frame.copy(); out[feature_names]=scaler.transform(frame[feature_names]); scaled.append(out)
-    return (*scaled,scaler)
+def fit_and_apply_scaler(train,val,test,features):
+    scaler=StandardScaler().fit(train[features]); result=[]
+    for frame in (train,val,test):
+        x=frame.copy(); x[features]=scaler.transform(frame[features]); result.append(x)
+    return (*result,scaler)
 
 
 def frames_to_sequences(frame,include_metadata=False):
     xs,ys,metas=[],[],[]
-    for pid in sorted(frame["p_id"].unique()):
-        patient=frame[frame["p_id"]==pid].sort_index(); x,y=create_sequences_for_classification(patient,lookback=LOOKBACK)
+    for pid in sorted(frame.p_id.unique()):
+        p=frame[frame.p_id==pid].sort_index(); x,y=create_sequences_for_classification(p,lookback=LOOKBACK)
         if not len(x): continue
         xs.append(x); ys.append(y)
-        if include_metadata:
-            target_rows=patient.iloc[LOOKBACK:].copy(); metas.append(pd.DataFrame({"p_id":target_rows["p_id"].values,"timestamp":target_rows.index}))
-    if not xs:
-        empty_x=np.empty((0,LOOKBACK,0)); empty_y=np.empty((0,),dtype=int)
-        return (empty_x,empty_y,pd.DataFrame()) if include_metadata else (empty_x,empty_y)
-    x_all,y_all=np.concatenate(xs),np.concatenate(ys)
-    return (x_all,y_all,pd.concat(metas,ignore_index=True)) if include_metadata else (x_all,y_all)
+        if include_metadata: metas.append(pd.DataFrame({"p_id":p.iloc[LOOKBACK:].p_id.values,"timestamp":p.iloc[LOOKBACK:].index}))
+    if not xs: raise RuntimeError("Not enough data to create sequences")
+    X,Y=np.concatenate(xs),np.concatenate(ys); return (X,Y,pd.concat(metas,ignore_index=True)) if include_metadata else (X,Y)
 
 
-def attach_unscaled_metadata(sequence_meta,unscaled_test_df):
-    source=unscaled_test_df.reset_index().rename(columns={unscaled_test_df.index.name or "index":"timestamp"}); source["timestamp"]=pd.to_datetime(source["timestamp"])
-    sequence_meta=sequence_meta.copy(); sequence_meta["timestamp"]=pd.to_datetime(sequence_meta["timestamp"])
-    merged=sequence_meta.merge(source[["p_id","timestamp","glucose"]],on=["p_id","timestamp"],how="left")
-    if merged["glucose"].isna().any(): raise RuntimeError("Could not align original glucose metadata with test sequences.")
+def attach_unscaled_metadata(meta,test):
+    source=test.reset_index().rename(columns={test.index.name or "index":"timestamp"}); source.timestamp=pd.to_datetime(source.timestamp); meta=meta.copy(); meta.timestamp=pd.to_datetime(meta.timestamp)
+    merged=meta.merge(source[["p_id","timestamp","glucose"]],on=["p_id","timestamp"],how="left")
+    if merged.glucose.isna().any(): raise RuntimeError("Could not align original glucose metadata")
     return merged
 
 
-def calculate_metrics(model,x_test,y_test,threshold):
-    probabilities=model.predict(x_test,verbose=0).flatten(); predictions=(probabilities>=threshold).astype(int); tn,fp,fn,tp=confusion_matrix(y_test,predictions,labels=[0,1]).ravel()
-    auc=roc_auc_score(y_test,probabilities) if len(np.unique(y_test))>1 else None
-    return {"roc_auc":auc,"recall_sensitivity":tp/(tp+fn) if tp+fn else 0.,"precision_ppv":tp/(tp+fp) if tp+fp else 0.,"specificity":tn/(tn+fp) if tn+fp else 0.,"npv":tn/(tn+fn) if tn+fn else 0.,"f1":f1_score(y_test,predictions,zero_division=0),"confusion_matrix":{"tn":int(tn),"fp":int(fp),"fn":int(fn),"tp":int(tp)},"test_samples":int(len(y_test)),"test_positive_samples":int(y_test.sum())},probabilities
+def calculate_metrics(model,x,y,threshold):
+    p=model.predict(x,verbose=0).flatten(); pred=(p>=threshold).astype(int); tn,fp,fn,tp=confusion_matrix(y,pred,labels=[0,1]).ravel(); auc=roc_auc_score(y,p) if len(np.unique(y))>1 else None
+    return {"roc_auc":auc,"recall_sensitivity":tp/(tp+fn) if tp+fn else 0.,"precision_ppv":tp/(tp+fp) if tp+fp else 0.,"specificity":tn/(tn+fp) if tn+fp else 0.,"npv":tn/(tn+fn) if tn+fn else 0.,"f1":f1_score(y,pred,zero_division=0),"confusion_matrix":{"tn":int(tn),"fp":int(fp),"fn":int(fn),"tp":int(tp)},"test_samples":int(len(y)),"test_positive_samples":int(y.sum())},p
 
 
 def main():
-    print("\n=== ZYNTRA HYPO V3: ALERT QUALITY ==="); df=process_full_data(); feature_names=[c for c in df.columns if c not in EXCLUDED_COLUMNS]
-    train_raw,val_raw,test_raw,split_info=split_dataset(df); print(f"Split strategy: {split_info['strategy']}")
-    if split_info.get("warning"): print(f"WARNING: {split_info['warning']}")
-    train_df,val_df,test_df,scaler=fit_and_apply_scaler(train_raw,val_raw,test_raw,feature_names); x_train,y_train=frames_to_sequences(train_df); x_val,y_val=frames_to_sequences(val_df); x_test,y_test,test_meta=frames_to_sequences(test_df,include_metadata=True); test_meta=attach_unscaled_metadata(test_meta,test_raw)
-    if min(len(x_train),len(x_val),len(x_test))==0: raise RuntimeError("Not enough data to create train/validation/test sequences.")
-    present_classes=np.unique(y_train); weights=compute_class_weight("balanced",classes=present_classes,y=y_train); class_weights={int(c):float(w) for c,w in zip(present_classes,weights)}
-    model=build_hypoglycemia_classifier(LOOKBACK,len(feature_names)); model.compile(optimizer="adam",loss="binary_crossentropy",metrics=[tf.keras.metrics.Precision(name="precision"),tf.keras.metrics.Recall(name="recall"),tf.keras.metrics.AUC(name="auc")]); model.fit(x_train,y_train,validation_data=(x_val,y_val),class_weight=class_weights,epochs=50,batch_size=64,callbacks=[EarlyStopping(monitor="val_auc",patience=15,restore_best_weights=True,mode="max")],verbose=1)
-    threshold=float(find_optimal_threshold(model,x_val,y_val,beta=BETA)); sample_metrics,probabilities=calculate_metrics(model,x_test,y_test,threshold); event_metrics=evaluate_events(test_meta,probabilities,threshold,horizon_minutes=30); alert_analysis=build_alert_analysis(test_meta,probabilities,threshold,horizon_minutes=30); sweep=threshold_sweep(test_meta,probabilities,horizon_minutes=30)
+    print("\n=== ZYNTRA HYPO V5: DYNAMICS + REPRODUCIBILITY ===")
+    df=add_glucose_dynamics(process_full_data()); features=[c for c in df.columns if c not in EXCLUDED_COLUMNS]
+    train_raw,val_raw,test_raw,split_info=split_dataset(df); train,val,test,scaler=fit_and_apply_scaler(train_raw,val_raw,test_raw,features)
+    xtr,ytr=frames_to_sequences(train); xv,yv=frames_to_sequences(val); xt,yt,meta=frames_to_sequences(test,True); meta=attach_unscaled_metadata(meta,test_raw)
+    classes=np.unique(ytr); weights=compute_class_weight("balanced",classes=classes,y=ytr); cw={int(c):float(w) for c,w in zip(classes,weights)}
+    model=build_hypoglycemia_classifier(LOOKBACK,len(features)); model.compile(optimizer="adam",loss="binary_crossentropy",metrics=[tf.keras.metrics.Precision(name="precision"),tf.keras.metrics.Recall(name="recall"),tf.keras.metrics.AUC(name="auc")])
+    model.fit(xtr,ytr,validation_data=(xv,yv),class_weight=cw,epochs=50,batch_size=64,shuffle=False,callbacks=[EarlyStopping(monitor="val_auc",patience=15,restore_best_weights=True,mode="max")],verbose=1)
+    threshold=float(find_optimal_threshold(model,xv,yv,beta=BETA)); metrics,prob=calculate_metrics(model,xt,yt,threshold); events=evaluate_events(meta,prob,threshold,30); alerts=build_alert_analysis(meta,prob,threshold,30); sweep=threshold_sweep(meta,prob,horizon_minutes=30)
     MODELS_DIR.mkdir(parents=True,exist_ok=True); model.save(MODEL_PATH); np.save(THRESHOLD_PATH,threshold)
-    with open(SCALER_PATH,"wb") as fh: pickle.dump(scaler,fh)
-    with open(FEATURE_NAMES_PATH,"w",encoding="utf-8") as fh: json.dump(feature_names,fh,indent=2)
-    alert_analysis.to_csv(ALERT_ANALYSIS_PATH,index=False); sweep.to_csv(THRESHOLD_SWEEP_PATH,index=False)
-    report={"model":"lstm_hypoglycemia_classifier_v3_alert_quality","prediction_horizon_minutes":30,"lookback_minutes":LOOKBACK*5,"threshold":threshold,"threshold_metric":f"F{BETA}","split":split_info,"patients_total":int(df.p_id.nunique()),"rows":{"train":len(train_raw),"validation":len(val_raw),"test":len(test_raw)},"sequences":{"train":len(x_train),"validation":len(x_val),"test":len(x_test)},"sample_metrics":sample_metrics,"event_metrics":event_metrics,"alert_quality":{"analysis_csv":ALERT_ANALYSIS_PATH.name,"threshold_sweep_csv":THRESHOLD_SWEEP_PATH.name,"tp_events":int((alert_analysis.classification=="TP").sum()),"fp_alerts":int((alert_analysis.classification=="FP").sum()),"fn_events":int((alert_analysis.classification=="FN").sum())},"limitations":["Current demo contains too few patients for robust external generalization.","IOB is still a simple rolling bolus sum and should be replaced by an insulin-action model.","Threshold sweep is diagnostic only: final operating threshold must be selected on validation data, never on test performance."]}
-    with open(EVALUATION_PATH,"w",encoding="utf-8") as fh: json.dump(report,fh,indent=2,default=_json_default)
-    print(json.dumps(report,indent=2,default=_json_default)); print(f"Alert analysis saved to {ALERT_ANALYSIS_PATH}"); print(f"Threshold sweep saved to {THRESHOLD_SWEEP_PATH}")
-
+    with open(SCALER_PATH,"wb") as f: pickle.dump(scaler,f)
+    with open(FEATURE_NAMES_PATH,"w") as f: json.dump(features,f,indent=2)
+    alerts.to_csv(ALERT_ANALYSIS_PATH,index=False); sweep.to_csv(THRESHOLD_SWEEP_PATH,index=False)
+    report={"model":"lstm_hypoglycemia_classifier_v5_dynamics","seed":SEED,"deterministic_training":True,"prediction_horizon_minutes":30,"lookback_minutes":LOOKBACK*5,"threshold":threshold,"threshold_metric":f"F{BETA}","features":features,"new_v5_features":["glucose_delta_5m","glucose_delta_15m","glucose_delta_30m","glucose_acceleration_15m"],"split":split_info,"patients_total":int(df.p_id.nunique()),"sample_metrics":metrics,"event_metrics":events,"alert_quality":{"tp_events":int((alerts.classification=="TP").sum()),"fp_alerts":int((alerts.classification=="FP").sum()),"fn_events":int((alerts.classification=="FN").sum())},"product_research_target":{"event_recall_min":.80,"false_alerts_per_patient_day_max":1.0,"median_warning_minutes_min":15},"limitations":["Current demo contains too few patients for robust external generalization.","IOB remains a simple rolling bolus sum.","Product research targets are experimental, not clinically validated thresholds."]}
+    with open(EVALUATION_PATH,"w") as f: json.dump(report,f,indent=2,default=_json_default)
+    print(json.dumps(report,indent=2,default=_json_default))
 
 if __name__=="__main__": main()
