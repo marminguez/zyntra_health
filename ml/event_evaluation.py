@@ -59,8 +59,8 @@ def evaluate_events(test_metadata, probabilities, threshold, horizon_minutes=HOR
     """Evaluate alerts against real hypoglycemia episodes patient by patient.
 
     test_metadata must contain: p_id, timestamp, glucose.
-    An alert emitted at time t forecasts risk at t+horizon. It detects an event
-    when that forecasted time lands inside the real glucose<70 episode.
+    A real event is counted as detected only when at least one alert occurs
+    strictly before event onset and no more than ``horizon_minutes`` beforehand.
     Consecutive alert samples are grouped into a single alert episode.
     """
     meta = test_metadata.reset_index(drop=True).copy()
@@ -94,10 +94,11 @@ def evaluate_events(test_metadata, probabilities, threshold, horizon_minutes=HOR
         matched_alerts = set()
 
         for event in real_events:
+            window_start = event.start - pd.Timedelta(minutes=horizon_minutes)
             matching = frame[
                 frame["alert"]
-                & ((frame["timestamp"] + pd.Timedelta(minutes=horizon_minutes)) >= event.start)
-                & ((frame["timestamp"] + pd.Timedelta(minutes=horizon_minutes)) <= event.end)
+                & (frame["timestamp"] < event.start)
+                & (frame["timestamp"] >= window_start)
             ]
             if not matching.empty:
                 detected_events += 1
@@ -144,6 +145,7 @@ def evaluate_events(test_metadata, probabilities, threshold, horizon_minutes=HOR
             "hypoglycemia": "glucose < 70 mg/dL",
             "prediction_horizon_minutes": horizon_minutes,
             "episode_gap_minutes": TIMESTEP_MINUTES,
+            "detection_rule": "Alert must occur before event onset and within the prediction horizon.",
             "note": "Consecutive positive samples are counted as one episode/alert, not multiple events.",
         },
     }
