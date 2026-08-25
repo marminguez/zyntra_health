@@ -40,6 +40,17 @@ def choose_threshold(model,xv,yv):
         score=(1+beta2)*tp/((1+beta2)*tp+beta2*fn+fp) if tp else 0.
         if score>best[1]: best=(float(t),float(score))
     return best[0]
+def classify_false_alerts(fps):
+    """Return near-miss and clear-FP counts across alert_quality schema versions."""
+    if fps.empty:
+        return 0,0
+    if "fp_subtype" in fps.columns:
+        return int((fps["fp_subtype"]=="near_miss").sum()), int((fps["fp_subtype"]=="clear_false_positive").sum())
+    # Older alert_quality stores the minimum glucose in the next 30m as event_min_glucose for FP rows.
+    future_min=pd.to_numeric(fps.get("event_min_glucose"),errors="coerce")
+    near=int(((future_min>=70)&(future_min<80)).sum())
+    clear=int(len(fps)-near)
+    return near,clear
 def train_fold(data,test_id):
     seed_all(); remaining=[int(x) for x in sorted(data.p_id.unique()) if int(x)!=int(test_id)]; val_id=choose_validation_patient(remaining,test_id); train_ids=[x for x in remaining if x!=val_id]
     train=data[data.p_id.isin(train_ids)].copy(); val=data[data.p_id==val_id].copy(); test=data[data.p_id==test_id].copy()
@@ -48,7 +59,8 @@ def train_fold(data,test_id):
     model=build_hypoglycemia_classifier(LOOKBACK,len(FEATURES)); model.compile(optimizer="adam",loss="binary_crossentropy",metrics=[tf.keras.metrics.AUC(name="auc")])
     model.fit(xtr,ytr,validation_data=(xv,yv),class_weight=cw,epochs=35,batch_size=128,shuffle=False,callbacks=[EarlyStopping(monitor="val_auc",patience=8,restore_best_weights=True,mode="max")],verbose=0)
     threshold=choose_threshold(model,xv,yv); probs=model.predict(xt,verbose=0).ravel(); auc=float(roc_auc_score(yt,probs)) if len(np.unique(yt))>1 else None; ev=evaluate_events(meta,probs,threshold,30); analysis=build_alert_analysis(meta,probs,threshold,30); fps=analysis[analysis.classification=="FP"]
-    return {"test_patient":int(test_id),"validation_patient":int(val_id),"train_patients":train_ids,"threshold":threshold,"roc_auc":auc,"hypoglycemia_events":ev["hypoglycemia_events"],"detected_events":ev["detected_events"],"missed_events":ev["missed_events"],"event_recall":ev["event_recall"],"median_warning_minutes":ev["median_warning_minutes"],"false_alert_episodes":ev["false_alert_episodes"],"false_alerts_per_patient_day":ev["false_alerts_per_patient_day"],"observed_patient_days":ev["observed_patient_days"],"near_miss_alerts":int((fps.fp_subtype=="near_miss").sum()) if len(fps) else 0,"clear_false_alerts":int((fps.fp_subtype=="clear_false_positive").sum()) if len(fps) else 0}
+    near,clear=classify_false_alerts(fps)
+    return {"test_patient":int(test_id),"validation_patient":int(val_id),"train_patients":train_ids,"threshold":threshold,"roc_auc":auc,"hypoglycemia_events":ev["hypoglycemia_events"],"detected_events":ev["detected_events"],"missed_events":ev["missed_events"],"event_recall":ev["event_recall"],"median_warning_minutes":ev["median_warning_minutes"],"false_alert_episodes":ev["false_alert_episodes"],"false_alerts_per_patient_day":ev["false_alerts_per_patient_day"],"observed_patient_days":ev["observed_patient_days"],"near_miss_alerts":near,"clear_false_alerts":clear}
 def aggregate(folds):
     df=pd.DataFrame(folds); total_events=int(df.hypoglycemia_events.sum()); total_detected=int(df.detected_events.sum())
     return {"patients":len(df),"pooled_events":total_events,"pooled_detected":total_detected,"pooled_event_recall":total_detected/total_events if total_events else None,"mean_patient_event_recall":float(df.event_recall.mean()),"median_patient_event_recall":float(df.event_recall.median()),"std_patient_event_recall":float(df.event_recall.std(ddof=0)),"mean_false_alerts_per_patient_day":float(df.false_alerts_per_patient_day.mean()),"median_false_alerts_per_patient_day":float(df.false_alerts_per_patient_day.median()),"median_warning_minutes_across_patients":float(df.median_warning_minutes.dropna().median()) if df.median_warning_minutes.notna().any() else None}
