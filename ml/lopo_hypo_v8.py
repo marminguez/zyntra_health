@@ -2,7 +2,7 @@
 from __future__ import annotations
 import argparse,json,os,random
 from pathlib import Path
-os.environ.setdefault("PYTHONHASHSEED","42"); os.environ.setdefault("TF_DETERMINISTIC_OPS","1")
+os.environ.setdefault("PYTHONHASHSEED","42"); os.environ.setdefault("TF_DETERMINISTIC_OPTS","1")
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -43,8 +43,8 @@ def sweep(meta,probs):
  return pd.DataFrame(rows)
 def select_threshold(s):
  ok=s[(s.event_recall>=.90)&(s.median_warning_minutes>=15.)]
- if len(ok): return float(ok.sort_values(["false_alerts_per_patient_day","threshold"],[True,False]).iloc[0].threshold),"constrained_min_fp"
- return float(s.sort_values(["event_recall","false_alerts_per_patient_day"],[False,True]).iloc[0].threshold),"fallback_max_recall"
+ if len(ok): return float(ok.sort_values(["false_alerts_per_patient_day","threshold"],ascending=[True,False]).iloc[0].threshold),"constrained_min_fp"
+ return float(s.sort_values(["event_recall","false_alerts_per_patient_day"],ascending=[False,True]).iloc[0].threshold),"fallback_max_recall"
 def fold(data,test_id,outdir):
  seed_all(); rem=[int(x) for x in sorted(data.p_id.unique()) if int(x)!=test_id]; vid=val_patient(rem,test_id); tids=[x for x in rem if x!=vid]; tr=data[data.p_id.isin(tids)]; va=data[data.p_id==vid]; te=data[data.p_id==test_id]
  scaler=StandardScaler().fit(tr[FEATURES].fillna(0.)); xtr,ytr,_=seq(tr,scaler); xv,yv,mv=seq(va,scaler); xt,yt,mt=seq(te,scaler)
