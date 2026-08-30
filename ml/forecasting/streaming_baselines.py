@@ -1,15 +1,18 @@
 """Streaming V14.0 baseline evaluation for large MetaboNet parquet files.
 
-Reads only id/source/date/CGM in bounded PyArrow batches and keeps at most 120
-minutes of history per subject. This avoids materializing train.parquet in RAM.
+The public train.parquet is not guaranteed to be physically time-ordered by
+subject. We therefore let DuckDB perform an external ORDER BY on
+(source_file, id, date), spilling to disk when needed, and consume the ordered
+result in bounded Arrow batches. test.parquet remains excluded.
 """
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import math
 
+import duckdb
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -53,7 +56,7 @@ class Agg:
         }
 
 
-def _slice_name(target: float) -> list[str]:
+def _slice_names(target: float) -> list[str]:
     names = []
     if target < 70:
         names.append("hypoglycemia_<70")
@@ -70,6 +73,7 @@ def evaluate_metabonet_train_streaming(
     data_dir: str | Path,
     batch_size: int = 100_000,
     progress_every_batches: int = 10,
+    temp_dir: str | Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     path = Path(data_dir) / "train.parquet"
     if not path.exists():
@@ -86,90 +90,113 @@ def evaluate_metabonet_train_streaming(
         "hypoglycemia_<70", "target_70_180", "hyperglycemia_>180", "severe_hyper_>250"
     )}
 
-    # Per subject: timestamp -> (glucose, delta15). deque supports bounded pruning.
-    history: dict[tuple[str, str], dict[pd.Timestamp, tuple[float, float | None]]] = defaultdict(dict)
-    order: dict[tuple[str, str], deque[pd.Timestamp]] = defaultdict(deque)
-    last_ts: dict[tuple[str, str], pd.Timestamp] = {}
-    subjects: set[tuple[str, str]] = set()
-    datasets: set[str] = set()
-
     rows = 0
     valid_rows = 0
     glucose_min = math.inf
     glucose_max = -math.inf
     hypo_rows = 0
     hyper_rows = 0
+    subjects = 0
+    datasets: set[str] = set()
 
-    print(f"Streaming {path.name}: {pf.metadata.num_rows:,} parquet rows, {pf.num_row_groups} row groups")
+    tmp = Path(temp_dir) if temp_dir else Path(data_dir) / ".v14_duckdb_tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    db_path = tmp / "v14_sort.duckdb"
+    con = duckdb.connect(str(db_path))
+    con.execute(f"SET temp_directory='{str(tmp).replace("'", "''")}'")
+    con.execute("SET preserve_insertion_order=false")
+    con.execute("SET memory_limit='2GB'")
+
+    parquet_sql_path = str(path).replace("'", "''")
+    query = f"""
+        SELECT id, source_file, date, CGM
+        FROM read_parquet('{parquet_sql_path}')
+        WHERE id IS NOT NULL
+          AND source_file IS NOT NULL
+          AND date IS NOT NULL
+          AND CGM IS NOT NULL
+        ORDER BY source_file, id, date
+    """
+
+    print(f"Ordered streaming {path.name}: {pf.metadata.num_rows:,} parquet rows, {pf.num_row_groups} row groups")
+    print(f"DuckDB external sort temp dir: {tmp}")
     print(f"Batch size: {batch_size:,} rows; test.parquet remains excluded")
 
-    for batch_idx, batch in enumerate(pf.iter_batches(batch_size=batch_size, columns=COLUMNS), start=1):
-        frame = batch.to_pandas()
-        rows += len(frame)
-        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-        frame["CGM"] = pd.to_numeric(frame["CGM"], errors="coerce")
-        frame = frame.dropna(subset=COLUMNS)
+    reader = con.execute(query).fetch_record_batch(rows_per_batch=batch_size)
 
-        for r in frame.itertuples(index=False):
-            source = str(r.source_file)
-            pid = str(r.id)
-            ts = pd.Timestamp(r.date)
-            glucose = float(r.CGM)
-            if not math.isfinite(glucose):
-                continue
+    current_key: tuple[str, str] | None = None
+    history: dict[pd.Timestamp, tuple[float, float | None]] = {}
+    order: deque[pd.Timestamp] = deque()
+    last_ts: pd.Timestamp | None = None
 
-            key = (source, pid)
-            subjects.add(key)
-            datasets.add(source)
-            valid_rows += 1
-            glucose_min = min(glucose_min, glucose)
-            glucose_max = max(glucose_max, glucose)
-            hypo_rows += int(glucose < 70)
-            hyper_rows += int(glucose > 180)
+    try:
+        for batch_idx, batch in enumerate(reader, start=1):
+            frame = batch.to_pandas()
+            rows += len(frame)
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+            frame["CGM"] = pd.to_numeric(frame["CGM"], errors="coerce")
+            frame = frame.dropna(subset=COLUMNS)
 
-            prev_ts = last_ts.get(key)
-            if prev_ts is not None and ts < prev_ts:
-                raise ValueError(
-                    f"train.parquet is not time-ordered within subject {key}: {ts} < {prev_ts}. "
-                    "Streaming evaluation stopped rather than silently producing invalid horizons."
-                )
-            if ts in history[key]:
-                raise ValueError(f"Duplicate timestamp for subject {key}: {ts}")
-
-            hmap = history[key]
-            g15 = hmap.get(ts - pd.Timedelta(minutes=15))
-            delta15 = glucose - g15[0] if g15 is not None else None
-
-            # Current glucose is the exact future target for origins t-h.
-            for horizon in HORIZONS:
-                origin = hmap.get(ts - pd.Timedelta(minutes=horizon))
-                if origin is None:
+            for r in frame.itertuples(index=False):
+                source = str(r.source_file)
+                pid = str(r.id)
+                ts = pd.Timestamp(r.date)
+                glucose = float(r.CGM)
+                if not math.isfinite(glucose):
                     continue
-                origin_glucose, origin_delta15 = origin
-                pred_persistence = origin_glucose
-                metrics[("persistence", horizon)].add(origin_glucose, glucose, pred_persistence)
-                for s in _slice_name(glucose):
-                    slices[("persistence", horizon, s)].add(origin_glucose, glucose, pred_persistence)
 
-                if origin_delta15 is not None:
-                    pred_linear = float(np.clip(origin_glucose + (origin_delta15 / 15.0) * horizon, 40.0, 400.0))
-                    metrics[("linear_trend", horizon)].add(origin_glucose, glucose, pred_linear)
-                    for s in _slice_name(glucose):
-                        slices[("linear_trend", horizon, s)].add(origin_glucose, glucose, pred_linear)
+                key = (source, pid)
+                if key != current_key:
+                    subjects += 1
+                    datasets.add(source)
+                    current_key = key
+                    history = {}
+                    order = deque()
+                    last_ts = None
 
-            hmap[ts] = (glucose, delta15)
-            order[key].append(ts)
-            last_ts[key] = ts
+                valid_rows += 1
+                glucose_min = min(glucose_min, glucose)
+                glucose_max = max(glucose_max, glucose)
+                hypo_rows += int(glucose < 70)
+                hyper_rows += int(glucose > 180)
 
-            cutoff = ts - pd.Timedelta(minutes=120)
-            q = order[key]
-            while q and q[0] < cutoff:
-                old = q.popleft()
-                hmap.pop(old, None)
+                if last_ts is not None and ts == last_ts:
+                    raise ValueError(f"Duplicate timestamp for subject {key}: {ts}")
 
-        if batch_idx % progress_every_batches == 0:
-            pct = min(rows / max(pf.metadata.num_rows, 1) * 100.0, 100.0)
-            print(f"  processed {rows:,}/{pf.metadata.num_rows:,} rows ({pct:.1f}%)", flush=True)
+                g15 = history.get(ts - pd.Timedelta(minutes=15))
+                delta15 = glucose - g15[0] if g15 is not None else None
+
+                for horizon in HORIZONS:
+                    origin = history.get(ts - pd.Timedelta(minutes=horizon))
+                    if origin is None:
+                        continue
+                    origin_glucose, origin_delta15 = origin
+
+                    pred_persistence = origin_glucose
+                    metrics[("persistence", horizon)].add(origin_glucose, glucose, pred_persistence)
+                    for s in _slice_names(glucose):
+                        slices[("persistence", horizon, s)].add(origin_glucose, glucose, pred_persistence)
+
+                    if origin_delta15 is not None:
+                        pred_linear = float(np.clip(origin_glucose + (origin_delta15 / 15.0) * horizon, 40.0, 400.0))
+                        metrics[("linear_trend", horizon)].add(origin_glucose, glucose, pred_linear)
+                        for s in _slice_names(glucose):
+                            slices[("linear_trend", horizon, s)].add(origin_glucose, glucose, pred_linear)
+
+                history[ts] = (glucose, delta15)
+                order.append(ts)
+                last_ts = ts
+
+                cutoff = ts - pd.Timedelta(minutes=120)
+                while order and order[0] < cutoff:
+                    old = order.popleft()
+                    history.pop(old, None)
+
+            if batch_idx % progress_every_batches == 0:
+                pct = min(rows / max(pf.metadata.num_rows, 1) * 100.0, 100.0)
+                print(f"  processed {rows:,}/{pf.metadata.num_rows:,} rows ({pct:.1f}%)", flush=True)
+    finally:
+        con.close()
 
     metric_rows = []
     for model in ("persistence", "linear_trend"):
@@ -181,8 +208,7 @@ def evaluate_metabonet_train_streaming(
     for model in ("persistence", "linear_trend"):
         for horizon in HORIZONS:
             for s in ("hypoglycemia_<70", "target_70_180", "hyperglycemia_>180", "severe_hyper_>250"):
-                row = slices[(model, horizon, s)].row()
-                slice_rows.append({"model": model, "horizon_minutes": horizon, "slice": s, **row})
+                slice_rows.append({"model": model, "horizon_minutes": horizon, "slice": s, **slices[(model, horizon, s)].row()})
     slices_df = pd.DataFrame(slice_rows)
 
     summary = {
@@ -191,12 +217,13 @@ def evaluate_metabonet_train_streaming(
         "parquet_rows": int(pf.metadata.num_rows),
         "rows_scanned": int(rows),
         "valid_cgm_rows": int(valid_rows),
-        "subjects": int(len(subjects)),
+        "subjects": int(subjects),
         "datasets": int(len(datasets)),
-        "glucose_min": None if glucose_min is math.inf else float(glucose_min),
-        "glucose_max": None if glucose_max is -math.inf else float(glucose_max),
+        "glucose_min": None if math.isinf(glucose_min) else float(glucose_min),
+        "glucose_max": None if math.isinf(glucose_max) else float(glucose_max),
         "hypoglycemia_rows": int(hypo_rows),
         "hyperglycemia_rows": int(hyper_rows),
         "streaming_batch_size": int(batch_size),
+        "ordering": "DuckDB external ORDER BY source_file,id,date",
     }
     return metrics_df, slices_df, summary
