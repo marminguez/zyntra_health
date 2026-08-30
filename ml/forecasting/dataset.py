@@ -1,7 +1,8 @@
 """Dataset utilities for Zyntra V14 multi-horizon forecasting.
 
-Targets are created independently inside each patient/source sequence so future
-values can never cross patient or dataset boundaries.
+Targets are matched by real timestamps inside each patient/source sequence.
+This avoids treating a missing 5-minute CGM row as if the next available row
+were still exactly one sample later.
 """
 from __future__ import annotations
 
@@ -15,10 +16,17 @@ SAMPLE_MINUTES = 5
 
 def _group_columns(df: pd.DataFrame) -> list[str]:
     cols = [c for c in ("p_id", "patient_id", "source_file", "source_split") if c in df.columns]
-    # Prefer one patient identifier, while retaining source boundaries when present.
     if "p_id" in cols and "patient_id" in cols:
         cols.remove("patient_id")
     return cols
+
+
+def _time_column(df: pd.DataFrame) -> str | None:
+    if "date" in df.columns:
+        return "date"
+    if "timestamp" in df.columns:
+        return "timestamp"
+    return None
 
 
 def add_forecast_targets(
@@ -27,10 +35,11 @@ def add_forecast_targets(
     glucose_col: str = "glucose",
     sample_minutes: int = SAMPLE_MINUTES,
 ) -> pd.DataFrame:
-    """Return a copy with glucose targets at each requested future horizon.
+    """Add exact +30/+60/+90/+120 minute glucose targets without leakage.
 
-    Assumes regular ``sample_minutes`` sampling inside each patient/source
-    sequence. Rows without all requested future targets are removed.
+    When a timestamp column is available, targets are joined on the exact future
+    timestamp rather than created with row shifts. This is important for real
+    CGM data containing gaps.
     """
     if glucose_col not in df.columns:
         raise ValueError(f"Missing required column: {glucose_col}")
@@ -40,33 +49,36 @@ def add_forecast_targets(
 
     work = df.copy()
     groups = _group_columns(work)
-    sort_cols = groups.copy()
-    if "timestamp" in work.columns:
-        sort_cols.append("timestamp")
-    elif isinstance(work.index, pd.DatetimeIndex):
-        work = work.assign(_timestamp=work.index)
-        sort_cols.append("_timestamp")
-    if sort_cols:
-        work = work.sort_values(sort_cols)
+    time_col = _time_column(work)
 
-    grouped = work.groupby(groups, sort=False, dropna=False)[glucose_col] if groups else None
-    target_cols = []
-    for horizon in horizons:
-        col = f"target_{horizon}"
-        steps = horizon // sample_minutes
-        work[col] = grouped.shift(-steps) if grouped is not None else work[glucose_col].shift(-steps)
-        target_cols.append(col)
+    if time_col:
+        work[time_col] = pd.to_datetime(work[time_col], errors="coerce")
+        work = work.dropna(subset=[time_col, glucose_col])
+        work = work.sort_values([*groups, time_col] if groups else [time_col])
+        base_keys = [*groups, time_col]
+        for horizon in horizons:
+            future = work[[*groups, time_col, glucose_col]].copy()
+            # A value observed at t+h should join onto the row at t.
+            future[time_col] = future[time_col] - pd.Timedelta(minutes=horizon)
+            future = future.rename(columns={glucose_col: f"target_{horizon}"})
+            work = work.merge(future, on=base_keys, how="left", validate="one_to_one")
+    else:
+        grouped = work.groupby(groups, sort=False, dropna=False)[glucose_col] if groups else None
+        for horizon in horizons:
+            steps = horizon // sample_minutes
+            work[f"target_{horizon}"] = grouped.shift(-steps) if grouped is not None else work[glucose_col].shift(-steps)
 
-    work = work.dropna(subset=[glucose_col, *target_cols]).copy()
-    if "_timestamp" in work.columns:
-        work = work.drop(columns="_timestamp")
-    return work
+    target_cols = [f"target_{h}" for h in horizons]
+    return work.dropna(subset=[glucose_col, *target_cols]).copy()
 
 
 def add_glucose_dynamics(df: pd.DataFrame, glucose_col: str = "glucose") -> pd.DataFrame:
-    """Add causal glucose dynamics used by Zyntra without future leakage."""
+    """Add causal glucose dynamics; gaps remain visible rather than interpolated."""
     work = df.copy()
     groups = _group_columns(work)
+    time_col = _time_column(work)
+    if time_col:
+        work = work.sort_values([*groups, time_col] if groups else [time_col])
     g = work.groupby(groups, sort=False, dropna=False)[glucose_col] if groups else None
 
     def diff(periods: int) -> pd.Series:
@@ -83,10 +95,14 @@ def add_glucose_dynamics(df: pd.DataFrame, glucose_col: str = "glucose") -> pd.D
 
 
 def describe_forecast_dataset(df: pd.DataFrame) -> dict:
-    patient_col = "p_id" if "p_id" in df.columns else "patient_id" if "patient_id" in df.columns else None
+    if "source_file" in df.columns and "patient_id" in df.columns:
+        patients = int(df[["source_file", "patient_id"]].drop_duplicates().shape[0])
+    else:
+        patient_col = "p_id" if "p_id" in df.columns else "patient_id" if "patient_id" in df.columns else None
+        patients = int(df[patient_col].nunique()) if patient_col else None
     return {
         "rows": int(len(df)),
-        "patients": int(df[patient_col].nunique()) if patient_col else None,
+        "patients": patients,
         "glucose_min": float(df.glucose.min()) if len(df) else None,
         "glucose_max": float(df.glucose.max()) if len(df) else None,
         "hypoglycemia_rows": int((df.glucose < 70).sum()) if len(df) else 0,
