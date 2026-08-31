@@ -44,12 +44,7 @@ def load(paths_):
 
 
 def weights_for_horizon(current: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """Pre-registered coarse weights driven only by clinical/dynamic regime.
-
-    Normal trajectories remain weight 1.0. Moderate extremes/dynamics are 2x;
-    future hypoglycemia and severe hyperglycemia are 3x. We deliberately avoid
-    tuning these values against validation in V14.3.
-    """
+    """Pre-registered coarse weights driven only by clinical/dynamic regime."""
     delta = target - current
     w = np.ones(len(target), dtype=np.float32)
     moderate = (target > 180) | (np.abs(delta) >= 30)
@@ -91,19 +86,32 @@ def main():
     xcurrent = xp[:,-1,0].copy(); vcurrent = xv_raw[:,-1,0].astype(float)
     xp = ((xp-mean)/std).astype(np.float32); xv=((xv_raw-mean)/std).astype(np.float32)
 
-    sw = {f"pred_{h}": weights_for_horizon(xcurrent, yp[:,i]) for i,h in enumerate(HORIZONS)}
+    # Keras 3 is strict about matching nested structures for multi-output
+    # targets and sample_weight. Use lists in the exact model-output order.
+    y_train_list = [yp[:, i] for i, _ in enumerate(HORIZONS)]
+    y_val_list = [yv[:, i] for i, _ in enumerate(HORIZONS)]
+    sw_list = [weights_for_horizon(xcurrent, yp[:, i]) for i, _ in enumerate(HORIZONS)]
+
     print("V14.3 fixed weighting prevalence (TRAIN only):")
     for i,h in enumerate(HORIZONS):
-        w=sw[f"pred_{h}"]
+        w = sw_list[i]
         print(f"  +{h}: 1x={(w==1).mean():.1%}, 2x={(w==2).mean():.1%}, 3x={(w==3).mean():.1%}")
 
     model=build_v14_forecaster(xp.shape[1],xp.shape[2])
     callbacks=[tf.keras.callbacks.EarlyStopping(monitor="val_loss",patience=4,restore_best_weights=True),
                tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss",factor=.5,patience=2,min_lr=1e-5),
                tf.keras.callbacks.ModelCheckpoint(str(out/"best_model.keras"),monitor="val_loss",save_best_only=True)]
-    hist=model.fit(xp,{f"pred_{h}":yp[:,i] for i,h in enumerate(HORIZONS)},sample_weight=sw,
-                   validation_data=(xv,{f"pred_{h}":yv[:,i] for i,h in enumerate(HORIZONS)}),
-                   epochs=args.epochs,batch_size=args.batch_size,shuffle=True,callbacks=callbacks,verbose=2)
+    hist=model.fit(
+        xp,
+        y_train_list,
+        sample_weight=sw_list,
+        validation_data=(xv, y_val_list),
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        shuffle=True,
+        callbacks=callbacks,
+        verbose=2,
+    )
     raw=model.predict(xv,batch_size=args.batch_size,verbose=1)
     pred=np.column_stack([a.reshape(-1) for a in raw])
     metrics=evaluate(yv,pred,vcurrent); metrics.to_csv(out/"v14_3_validation_metrics.csv",index=False)
