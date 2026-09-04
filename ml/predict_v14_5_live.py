@@ -78,7 +78,6 @@ def _decode_v14_5(outputs, current_glucose: np.ndarray) -> np.ndarray:
         vals = list(outputs) if isinstance(outputs, (list, tuple)) else [outputs]
         if len(vals) != 8:
             raise ValueError(f"Expected 8 V14.5 outputs, got {len(vals)}")
-        # V14.5 model defines absolute heads first, then delta heads, in horizon order.
         abs_vals = [np.asarray(v).reshape(-1) for v in vals[:4]]
         delta_vals = [np.asarray(v).reshape(-1) for v in vals[4:]]
     absolute = np.stack(abs_vals, axis=1).astype(np.float32)
@@ -116,8 +115,6 @@ def main() -> None:
     if list(template.columns) != expected_cols:
         raise ValueError(f"Unexpected template columns: {list(template.columns)}")
     template["date"] = pd.to_datetime(template["date"], errors="raise")
-    template["_row"] = np.arange(len(template), dtype=np.int64)
-    template_keys = set(zip(template["source_file"].astype(str), template["id"].astype(str), template["date"]))
 
     print(f"Template rows: {len(template):,}")
     print(f"Features: {len(FEATURE_NAMES)}; sequence length: {SEQ_LEN}")
@@ -125,13 +122,14 @@ def main() -> None:
     mean, std = _load_normalization(norm_path)
     model = tf.keras.models.load_model(model_path, compile=False)
 
-    # Map key -> template row. Coverage was checked separately; enforce uniqueness here.
+    # Map key -> exact template row. Use enumerate rather than a leading-underscore
+    # namedtuple field because pandas renames such fields in itertuples().
     key_to_row: dict[tuple[str, str, pd.Timestamp], int] = {}
-    for r in template.itertuples(index=False):
+    for row_idx, r in enumerate(template.itertuples(index=False)):
         key = (str(r.source_file), str(r.id), pd.Timestamp(r.date))
         if key in key_to_row:
             raise ValueError(f"Duplicate template key: {key}")
-        key_to_row[key] = int(r._row)
+        key_to_row[key] = row_idx
 
     preds = np.full((len(template), 4), np.nan, dtype=np.float32)
     persistence = np.full(len(template), np.nan, dtype=np.float32)
@@ -256,7 +254,6 @@ def main() -> None:
     if submission[list(PRED_COLS)].isna().any().any():
         raise RuntimeError("NaN predictions remain")
 
-    # Final invariant: keys and order exactly equal official template.
     original = pq.read_table(template_path, columns=list(KEY_COLS)).to_pandas()
     original["date"] = pd.to_datetime(original["date"], errors="raise")
     if not submission[list(KEY_COLS)].reset_index(drop=True).equals(original.reset_index(drop=True)):
