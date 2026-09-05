@@ -22,7 +22,7 @@ def collect(root:Path):
             source,pid=p.stem.split("__",1)
             with np.load(p,allow_pickle=False) as z: stamps=z["timestamp"].astype(str)
             ids=[]
-            for i,t in enumerate(stamps): rows.append((aid,source,pid,pd.Timestamp(t)));ids.append(aid);aid+=1
+            for i,t in enumerate(stamps): rows.append((aid,source,pid,pd.Timestamp(str(t))));ids.append(aid);aid+=1
             shards[(split,p.name)]={"path":p,"ids":np.asarray(ids,dtype=np.int64)}
     return pd.DataFrame(rows,columns=["anchor_id","source_file","id","anchor_date"]),shards
 
