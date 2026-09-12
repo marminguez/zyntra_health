@@ -13,6 +13,7 @@ import numpy as np
 HORIZONS = (30, 60, 90, 120)
 PREFIX_STEPS = (6, 12, 18, 24)
 STEP_MINUTES = 5
+BASAL_Z_CLIP = 5.0
 
 SUMMARY_FEATURE_NAMES = (
     "log1p_bolus_sum",
@@ -65,6 +66,13 @@ def _basal_stats(
     std = float(basal_std) if float(basal_std) > 1e-6 else 1.0
     mean_z = np.where(any_present, (mean_raw - float(basal_mean)) / std, 0.0)
     delta_z = delta / std
+
+    # Fixed robustness guard, independent of targets/validation performance.
+    # Raw audit showed rare implausible basal excursions above 20-30 SD; clipping
+    # prevents a few source-specific outliers from dominating the summary branch.
+    mean_z = np.clip(mean_z, -BASAL_Z_CLIP, BASAL_Z_CLIP)
+    delta_z = np.clip(delta_z, -BASAL_Z_CLIP, BASAL_Z_CLIP)
+
     coverage = count / float(steps)
 
     pair_present = present[:, 1:] & present[:, :-1]
