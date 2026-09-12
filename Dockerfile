@@ -48,5 +48,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 EXPOSE 3000
 
-ENTRYPOINT ["/usr/sbin/dumb-init", "--"]
+ENTRYPOINT ["dumb-init", "--"]
 CMD ["node_modules/.bin/next", "start"]
