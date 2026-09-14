@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from ml.forecasting.model_cgm24_aux import HORIZONS, PREFIX_STEPS, build_cgm24_aux_forecaster
+from forecasting.model_cgm24_aux import HORIZONS, PREFIX_STEPS, build_cgm24_aux_forecaster
 
 SEED = 42
 CHANNELS = (2, 3, 4, 5, 6, 7)
