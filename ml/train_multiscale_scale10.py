@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from forecasting.model_multiscale_history import (
+from ml.forecasting.model_multiscale_history import (
     HORIZONS,
     PREFIX_STEPS,
     build_multiscale_forecaster,
