@@ -1,4 +1,4 @@
-"""Train Top-3 multi-scale history fast screen on frozen Scale-10 data.
+"""Train Top-3 multi-scale history to convergence on frozen Scale-10 data.
 
 Scientific change vs V15.4 Scale-10:
 - same train/validation anchors
@@ -138,8 +138,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="ml/data/v15_4_scale10")
     ap.add_argument("--v14-1-dir", default="ml/results/v14_1")
-    ap.add_argument("--outdir", default="ml/results/multiscale_scale10")
-    ap.add_argument("--epochs", type=int, default=5)
+    ap.add_argument("--outdir", default="ml/results/multiscale_scale10_40ep")
+    ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch-size", type=int, default=64)
     args = ap.parse_args()
 
@@ -177,10 +177,10 @@ def main():
             delete_checkpoint=False,
         ),
         tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=2, restore_best_weights=True
+            monitor="val_loss", patience=5, restore_best_weights=True
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.5, patience=1, min_lr=1e-5
+            monitor="val_loss", factor=0.5, patience=2, min_lr=1e-5
         ),
         tf.keras.callbacks.ModelCheckpoint(
             str(out / "best.weights.h5"),
@@ -191,15 +191,15 @@ def main():
         tf.keras.callbacks.CSVLogger(str(out / "training_history.csv"), append=True),
     ]
 
-    print("=== MULTISCALE HISTORY SCALE-10 FAST SCREEN ===")
+    print("=== MULTISCALE HISTORY SCALE-10 — CONVERGENCE / RESUMABLE ===")
     print(f"train shards: {len(manifest):,}")
     print(f"train windows: {train_windows:,}")
     print(f"validation windows: {len(yv):,}")
-    print(f"epochs requested: {args.epochs}")
+    print(f"epochs ceiling: {args.epochs}")
     print("history encoder: recent 2h @5m + full 24h pooled @30m")
     print("future CGM input: False")
 
-    model.fit(
+    hist = model.fit(
         x=train_seq,
         validation_data=([xv, fv], val_targets),
         epochs=args.epochs,
@@ -234,7 +234,7 @@ def main():
     )
 
     report = {
-        "experiment": "multiscale-history-scale10",
+        "experiment": "multiscale-history-scale10-convergence",
         "scientific_change_vs_scale10": "dual-scale history encoder: recent 2h high-resolution + pooled 24h long context",
         "future_features": [
             "basal",
@@ -251,7 +251,9 @@ def main():
         "seed": SEED,
         "train_windows": int(train_windows),
         "validation_windows": int(len(yv)),
-        "epochs_requested": args.epochs,
+        "epochs_ceiling": args.epochs,
+        "training_protocol": "40ep ceiling; ES5; ReduceLR2; resumable",
+        "best_val_loss_epoch_this_process": int(np.argmin(hist.history["val_loss"]) + 1) if hist.history.get("val_loss") else None,
         "promotion_gate": "graduate only if mean DTS-A improves about >=0.5 pp OR mean MARD improves >=2% relative, without material RMSE regression",
     }
     (out / "multiscale_scale10_report.json").write_text(
@@ -264,6 +266,8 @@ def main():
     print(f"MARD: {mf.mard.mean():.6f}%")
     print(f"RMSE: {mf.rmse.mean():.6f}")
     print(f"Direction: {100.0 * mf.direction_accuracy.mean():.4f}%")
+    bestep = int(np.argmin(hist.history["val_loss"]) + 1) if hist.history.get("val_loss") else None
+    print(f"Best val_loss epoch in this process: {bestep} | epochs run in this process: {len(hist.history.get('loss', []))}")
     print("\nComponent RMSEs")
     print(
         pd.DataFrame(
